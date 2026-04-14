@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>🔊 30 SEC LOCKDOWN</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            width: 100%;
+            background: #000;
+            color: #fff;
+            font-family: 'Courier New', monospace;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            cursor: pointer;
+            user-select: none;
+        }
+        #message {
+            font-size: 3rem;
+            font-weight: bold;
+        }
+        .timer {
+            font-size: 5rem;
+            color: #ff4444;
+            margin-top: 20px;
+        }
+        .small {
+            font-size: 1rem;
+            opacity: 0.6;
+        }
+    </style>
+</head>
+<body>
+    <div>
+        <div id="message">⚠️ CLICK TO BEGIN ⚠️</div>
+        <div class="timer" id="timerDisplay"></div>
+        <div class="small">(You cannot stop this for 30 seconds)</div>
+    </div>
+
+    <script>
+        (function() {
+            "use strict";
+
+            // ---------- CONFIG ----------
+            const LOCK_DURATION = 30000; // 30 seconds in ms
+            let audioCtx = null;
+            let soundLoop = null;
+            let fullscreenInterval = null;
+            let timerInterval = null;
+            let wakeLock = null;
+            let startTime = null;
+            let isActive = false;
+
+            // DOM elements
+            const msgEl = document.getElementById('message');
+            const timerEl = document.getElementById('timerDisplay');
+
+            // ---------- UTILS ----------
+            function formatTime(ms) {
+                const seconds = Math.ceil(ms / 1000);
+                return `${seconds}s`;
+            }
+
+            // ---------- BLOCK ESCAPE ATTEMPTS ----------
+            function preventEscape(e) {
+                if (!isActive) return;
+                
+                // Block Esc key (exits fullscreen)
+                if (e.key === 'Escape') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    return false;
+                }
+                
+                // Block Ctrl+W, Ctrl+F4, Alt+F4 (show warning only)
+                if ((e.ctrlKey && (e.key === 'w' || e.key === 'W' || e.key === 'F4')) ||
+                    (e.altKey && e.key === 'F4')) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    // Show a custom alert (but browser will still ask via beforeunload)
+                    alert('❌ YOU CANNOT ESCAPE FOR 30 SECONDS ❌');
+                    return false;
+                }
+                
+                // Block F11 (fullscreen toggle)
+                if (e.key === 'F11') {
+                    e.preventDefault();
+                    return false;
+                }
+            }
+
+            // Before unload trap
+            function beforeUnloadHandler(e) {
+                if (!isActive) return;
+                // Standard way to trigger "Leave site?" dialog
+                e.preventDefault();
+                e.returnValue = 'ARE YOU SURE? THE SOUND WILL CONTINUE FOR 30 SECONDS!';
+                return e.returnValue;
+            }
+
+            // Block context menu
+            function blockContextMenu(e) {
+                if (isActive) e.preventDefault();
+            }
+
+            // Fullscreen lock – if they exit, re-enter immediately
+            async function enforceFullscreen() {
+                if (!isActive) return;
+                try {
+                    if (!document.fullscreenElement) {
+                        await document.documentElement.requestFullscreen();
+                    }
+                } catch (err) {
+                    // Ignore
+                }
+            }
+
+            // ---------- SOUND GENERATION (30 sec piercing loop) ----------
+            function startHorribleSound() {
+                if (audioCtx) return;
+                
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                
+                // Resume if needed
+                if (audioCtx.state === 'suspended') {
+                    audioCtx.resume();
+                }
+
+                // Create a combined oscillator for a harsh tone
+                const osc1 = audioCtx.createOscillator();
+                const osc2 = audioCtx.createOscillator();
+                const gainNode = audioCtx.createGain();
+                
+                osc1.type = 'sawtooth';
+                osc1.frequency.value = 880; // A5
+                osc2.type = 'square';
+                osc2.frequency.value = 440; // A4
+                
+                // Add a low-frequency oscillator for wobble
+                const lfo = audioCtx.createOscillator();
+                const lfoGain = audioCtx.createGain();
+                lfo.type = 'sine';
+                lfo.frequency.value = 8;
+                lfoGain.gain.value = 100;
+                lfo.connect(lfoGain);
+                lfoGain.connect(osc1.frequency);
+                
+                osc1.connect(gainNode);
+                osc2.connect(gainNode);
+                gainNode.connect(audioCtx.destination);
+                
+                // Set volume to ear-shattering
+                gainNode.gain.setValueAtTime(1.0, audioCtx.currentTime);
+                
+                // Start everything
+                osc1.start();
+                osc2.start();
+                lfo.start();
+                
+                // Also add white noise
+                const bufferSize = 4096;
+                const noiseNode = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+                noiseNode.onaudioprocess = function(e) {
+                    const output = e.outputBuffer.getChannelData(0);
+                    for (let i = 0; i < bufferSize; i++) {
+                        output[i] = (Math.random() * 2 - 1) * 0.5;
+                    }
+                };
+                const noiseGain = audioCtx.createGain();
+                noiseGain.gain.value = 0.6;
+                noiseNode.connect(noiseGain);
+                noiseGain.connect(audioCtx.destination);
+                
+                // Store references for stopping later
+                soundLoop = { osc1, osc2, lfo, noiseNode, gainNode, noiseGain };
+            }
+
+            function stopHorribleSound() {
+                if (soundLoop) {
+                    try {
+                        soundLoop.osc1.stop();
+                        soundLoop.osc2.stop();
+                        soundLoop.lfo.stop();
+                        soundLoop.noiseNode.disconnect();
+                    } catch (e) {}
+                }
+                if (audioCtx) {
+                    audioCtx.close();
+                    audioCtx = null;
+                }
+                soundLoop = null;
+            }
+
+            // ---------- ACTIVATE LOCKDOWN ----------
+            async function activateLockdown() {
+                if (isActive) return;
+                isActive = true;
+                startTime = Date.now();
+
+                // Update UI
+                msgEl.textContent = '🔊 LOCKDOWN ACTIVE 🔊';
+                
+                // Request fullscreen immediately
+                try {
+                    await document.documentElement.requestFullscreen();
+                } catch (e) {}
+
+                // Request wake lock to keep screen on
+                try {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                } catch (e) {}
+
+                // Start horrible sound
+                startHorribleSound();
+
+                // Add event listeners to block escape
+                window.addEventListener('keydown', preventEscape, true);
+                window.addEventListener('beforeunload', beforeUnloadHandler);
+                document.addEventListener('contextmenu', blockContextMenu);
+                
+                // Fullscreen enforcement loop
+                fullscreenInterval = setInterval(enforceFullscreen, 200);
+
+                // Timer countdown
+                timerInterval = setInterval(() => {
+                    if (!isActive) return;
+                    const elapsed = Date.now() - startTime;
+                    const remaining = Math.max(0, LOCK_DURATION - elapsed);
+                    timerEl.textContent = formatTime(remaining);
+                    
+                    if (remaining <= 0) {
+                        releaseLockdown();
+                    }
+                }, 100);
+
+                // Automatically release after LOCK_DURATION
+                setTimeout(releaseLockdown, LOCK_DURATION);
+            }
+
+            // ---------- RELEASE (after 30 sec) ----------
+            function releaseLockdown() {
+                if (!isActive) return;
+                isActive = false;
+
+                // Stop sound
+                stopHorribleSound();
+
+                // Clear intervals
+                clearInterval(fullscreenInterval);
+                clearInterval(timerInterval);
+                
+                // Remove event listeners
+                window.removeEventListener('keydown', preventEscape, true);
+                window.removeEventListener('beforeunload', beforeUnloadHandler);
+                document.removeEventListener('contextmenu', blockContextMenu);
+                
+                // Release wake lock
+                if (wakeLock) {
+                    wakeLock.release().catch(() => {});
+                    wakeLock = null;
+                }
+                
+                // Exit fullscreen
+                if (document.fullscreenElement) {
+                    document.exitFullscreen().catch(() => {});
+                }
+                
+                // Update UI
+                msgEl.innerHTML = '✅ LOCKDOWN OVER ✅<br><span class="small">(Refresh to try again)</span>';
+                timerEl.textContent = '';
+            }
+
+            // ---------- TRIGGER ON CLICK / TAP ----------
+            document.body.addEventListener('click', (e) => {
+                if (!isActive) {
+                    activateLockdown();
+                }
+            });
+
+            document.body.addEventListener('touchstart', (e) => {
+                e.preventDefault();
+                if (!isActive) {
+                    activateLockdown();
+                }
+            }, { passive: false });
+
+            // Additional: Block Ctrl+W via beforeunload already set
+            // But also intercept Ctrl+W on keydown
+            window.addEventListener('keydown', (e) => {
+                if (!isActive) return;
+                if (e.ctrlKey && e.key === 'w') {
+                    e.preventDefault();
+                    alert('❌ NICE TRY. 30 SECONDS. ❌');
+                }
+            });
+
+            // Prevent page from being closed via shortcut on some browsers
+            // (Best effort)
+        })();
+    </script>
+</body>
+</html>
